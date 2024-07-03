@@ -1,15 +1,8 @@
-# 整合SVM训练 批量训练
-import os
+import argparse
 import pandas as pd
 import numpy as np
-import random
-import pickle
-import sklearn.ensemble
 from sklearn import svm
 from sklearn.model_selection import train_test_split
-import ipdb
-import sys
-import io
 import contextlib
 
 from sklearn.metrics import roc_auc_score, mean_squared_error
@@ -26,6 +19,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from clearml import Task, Dataset, StorageManager
 import argparse
+import pickle
 
 # set plotting parameters
 large = 22; med = 16; small = 12
@@ -134,71 +128,30 @@ def get_ECFP6_counts(inp):
     fps, _ = desc.ECFP_counts(radius=3, useFeatures=True, useCounts=True)
     return fps
 
-def get_train_and_test(args):
-    train = pd.DataFrame()
-    test = pd.DataFrame()
-    if args.data_id:
-        data_path = Dataset.get(
-                dataset_id=args.data_id,
-                only_completed=True,
-                only_published=False,
-            ).get_local_copy()
-        # 读取数据
-        train = pd.read_csv(f'{data_path}/train.csv')
-        test = pd.read_csv(f'{data_path}/val.csv')
-    elif args.d_project and args.d_name:
-        data_path = Dataset.get(
-                dataset_project=args.d_project,
-                dataset_name=args.d_name,
-                only_completed=True,
-                only_published=False,
-            ).get_local_copy()
-        # 读取数据
-        train = pd.read_csv(f'{data_path}/train.csv')
-        test = pd.read_csv(f'{data_path}/val.csv')
-    elif args.train_url:
-        train_path = StorageManager.get_local_copy(args.train_url)
-        train = pd.read_csv(train_path, compression='gzip')
-        if args.val_url:
-            val_path = StorageManager.get_local_copy(args.val_url)
-            test = pd.read_csv(val_path, compression='gzip')
-    return train, test
-# if required, generate a folder to store the results
+def get_model_and_val(args):
+    model = None
+    val = pd.DataFrame()
+    if args.model_url:
+        model_path = StorageManager.get_local_copy(args.model_url)
+        with open(model_path, 'rb') as file:
+          model = pickle.load(file)
+    if args.val_url:
+        val_url = StorageManager.get_local_copy(args.val_url)
+        val = pd.read_csv(val_url, compression='gzip')
+    return model, val
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Chain two Python programs that handle CSV input/output.")
-    parser.add_argument("--data_id", required=False, default='', help="cleaml dataset id")
-    parser.add_argument("--d_project", required=False, default='', help="dataset project name")
-    parser.add_argument("--d_name", required=False, default='', help="dataset name")
-    parser.add_argument("--train_url", required=False, default='', help="train data url")
+    parser.add_argument("--model_url", required=False, default='', help="model url")
     parser.add_argument("--val_url", required=False, default='', help="validation data url")
     args = parser.parse_args()
-
-    train, test = get_train_and_test(args)
-    task = Task.init(project_name='paper', task_name='svm')
-    print("# obs in train: ", train.shape[0])
-    print("# obs in test: ", test.shape[0])
-    test_fps = get_ECFP6_counts(test["SMILES"])
-    print('test_fps\n', test_fps)
-    train_fps = get_ECFP6_counts(train["SMILES"])
-    print('train_fps\n', train_fps)
-    # initialize a "Support Vector Machine" (choice of hyper-parameters somewhat arbitrary)
-    # SVMclassifier = svm.SVC(class_weight='balanced', C=1.0, probability=True, verbose=True, cache_size=32000)
-    # fit to training data
-    # SVMclassifier.fit(train_fps, train["AV_Bit"])
-    # initialize a "Support Vector Machine" (choice of hyper-parameters somewhat arbitrary)
-    SVMclassifier = svm.LinearSVC(class_weight='balanced', verbose=True)
-    # fit to training data
-    SVMclassifier.fit(train_fps, train["AV_Bit"])
-    # save the model
-    task.upload_artifact('ckpt', SVMclassifier, wait_on_upload=True)
-    y_pred = SVMclassifier.predict(X=train_fps)
-    train_score = roc_auc_score(y_true=train["AV_Bit"], y_score=y_pred)
-    print(train_score)
-    y_pred_test = SVMclassifier.predict(X=test_fps)
-    # probabilities = SVMclassifier.predict_proba(X=test_fps)
-    test_score = roc_auc_score(y_true=test["AV_Bit"], y_score=y_pred_test)
+    task = Task.init(project_name='paper', task_name='svm_val')
+    model, val = get_model_and_val(args)
+    if model is None:
+        raise ValueError('model is None')
+    val_fps = get_ECFP6_counts(val["SMILES"])
+    y_pred = model.predict(X=val_fps)
+    test_score = roc_auc_score(y_true=val["AV_Bit"], y_score=y_pred)
     print(test_score)
-    test_with_prediction = test
-    test_with_prediction['prediction'] = y_pred_test
-    task.upload_artifact('pred', test_with_prediction.reset_index(drop=True), wait_on_upload=True)
+    print('DONE')
     task.close()
